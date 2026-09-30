@@ -30,11 +30,11 @@ critical.
 
 | Metric | Acceptable Low Score Scenario | Critical Low Score Scenario | Action Required |
 |---|---|---|---|
-| Faithfulness | | | |
-| Answer Relevance | | | |
-| Context Recall | | | |
-| Context Precision | | | |
-| Completeness | | | |
+| Faithfulness | Answer diễn đạt lại đúng ý context nhưng dùng từ khác, hoặc chỉ thêm câu chào / câu điều hướng chung. | Answer đưa ra số tiền, thời hạn, % phí, điều kiện bảo hành/đổi trả **không có** trong retrieved context (ví dụ hứa refund 100% khi policy có restocking fee). Đây là hallucination về chính sách → rủi ro tài chính/pháp lý và khiếu nại. | Đối chiếu từng claim với retrieved chunks; siết system prompt "chỉ trả lời từ context, không có thì nói không có thông tin"; yêu cầu cite source; **block deploy** nếu faithfulness giảm ở các case policy. |
+| Answer Relevance | Case out-of-scope mà assistant từ chối đúng và ngắn gọn — câu từ chối ít trùng từ với câu hỏi nên score thấp nhưng behavior đúng. | Hỏi về đổi trả nhưng trả lời về bảo hành; trả lời một policy đúng nhưng không phải cái khách hỏi; bị prompt injection kéo sang chủ đề khác. Khách không nhận được câu trả lời cho vấn đề của mình. | Xem lại intent của câu hỏi và retrieved chunks (retrieval lệch chủ đề hay generation lệch); thêm instruction "trả lời trực tiếp câu hỏi trước"; query rewriting; tách riêng đánh giá refusal cho adversarial cases. |
+| Context Recall | Câu out-of-scope / adversarial mà expected answer là từ chối — corpus vốn không có evidence để retrieve; hoặc expected answer dùng wording khác chunk nhưng answer vẫn đúng. | Câu Medium/Hard cần nhiều document (policy version, exception, điều kiện kết hợp) mà retriever bỏ sót document chứa điều kiện quan trọng → LLM không thể trả lời đúng dù generation tốt. | Kiểm tra query BM25 và chunk bị bỏ sót; tăng `top-k`, chunk theo section, query expansion / multi-query, hybrid search (BM25 + dense). Sửa retrieval **trước** khi sửa prompt. |
+| Context Precision | Recall đã đủ, chunk relevant vẫn nằm trong top-k và answer vẫn faithful + complete; hoặc câu hỏi rộng cần nhiều chunk nên một số chunk "noise" thực ra là context bổ trợ. | Chunk relevant bị xếp sau nhiều chunk nhiễu (ví dụ chunk warranty đứng trước chunk returns) và đi kèm faithfulness/completeness thấp → LLM lấy nhầm chính sách từ chunk sai. | Thêm reranker (cross-encoder hoặc overlap reranker như Exercise 3.5), giảm `top-k`, lọc theo metadata document; đo lại precision với recall giữ nguyên. |
+| Completeness | Expected answer có chi tiết phụ, answer bao đủ ý chính nhưng dùng từ đồng nghĩa; câu từ chối adversarial có wording khác expected nhưng cùng behavior. | Thiếu điều kiện hoặc ngoại lệ bắt buộc: deadline, phí, "không áp dụng cho sản phẩm đã kích hoạt/bị hư do nước", bước xác minh danh tính. Khách hiểu sai policy và hành động sai. | Kiểm tra context recall trước (thiếu evidence hay generation bỏ ý); nếu recall tốt thì sửa prompt yêu cầu nêu đủ conditions/exceptions; thêm các case nhiều điều kiện vào regression set. |
 
 ### Exercise 1.2 — Bias trong LLM-as-a-Judge
 
@@ -46,15 +46,57 @@ Ba bias thường gặp:
 
 **Câu 1: Thiết kế experiment phát hiện position bias với ít nhất hai conditions.**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Lấy khoảng 40 cặp answer (A, B) cho cùng một câu hỏi,
+> gồm cặp có chất lượng khác biệt rõ và cặp chất lượng tương đương. Giữ cố định
+> judge model, prompt, rubric và `temperature = 0`; chỉ thay đổi thứ tự.
+>
+> - **Condition 1 — Original order:** A ở vị trí 1, B ở vị trí 2.
+> - **Condition 2 — Swapped order:** B ở vị trí 1, A ở vị trí 2.
+> - **Condition 3 — Control (identical pair):** A vs A. Judge không có bias thì
+>   phải cho tie hoặc chọn mỗi vị trí khoảng 50%.
+>
+> Đo: (1) **consistency rate** = tỉ lệ cặp mà winner giữ nguyên sau khi swap;
+> (2) tỉ lệ judge chọn vị trí 1 trên toàn bộ lần chấm; (3) tỉ lệ chọn vị trí 1 ở
+> control. Nếu consistency thấp (ví dụ < 80%) hoặc vị trí 1 thắng lệch rõ khỏi
+> 50% (kiểm định binomial/McNemar) thì judge có position bias. Cách giảm: luôn
+> chấm cả hai thứ tự, chỉ chấp nhận kết quả khi hai lần nhất quán, còn lại coi là
+> tie; hoặc dùng pointwise scoring theo rubric thay vì pairwise.
 
 **Câu 2: Làm thế nào giảm verbosity bias bằng rubric design?**
 
 > *Câu trả lời:*
+>
+> - Chấm theo **checklist claim cụ thể** thay vì ấn tượng chung: rubric liệt kê
+>   các facts bắt buộc (thời hạn, số tiền, điều kiện, ngoại lệ) và score dựa trên
+>   số facts đúng, không dựa trên độ dài.
+> - Ghi rõ trong rubric: "Độ dài không phải tiêu chí; thông tin thừa không được
+>   cộng điểm". Claim không có evidence hoặc lan man ngoài câu hỏi bị **trừ điểm**.
+> - Thêm dimension riêng cho conciseness/clarity để câu trả lời dài dòng không
+>   được thưởng ở dimension correctness.
+> - Few-shot anchor: một ví dụ ngắn đúng đủ = 5, một ví dụ dài nhưng có claim
+>   thừa hoặc sai = 2–3.
+> - Kiểm tra lại bằng thí nghiệm padding: thêm câu trung tính vào một answer. Nếu
+>   score tăng thì rubric vẫn còn verbosity bias.
 
 **Câu 3: Tại sao cần calibrate LLM judge với human labels?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Score của LLM judge chỉ là proxy cho đánh giá của con người.
+> Trước khi dùng judge làm quality gate, cần biết nó đồng thuận với expert đến mức
+> nào. Nếu không calibrate, judge có thể:
+>
+> - **Dễ dãi** (leniency: cho 4–5 gần như mọi answer).
+> - Bỏ sót lỗi domain, ví dụ sai phí restocking hoặc sai thời hạn bảo hành.
+> - Có position, verbosity hoặc self-preference bias.
+>
+> Cách làm:
+>
+> 1. Hai người gắn nhãn cùng 50–100 samples theo cùng rubric.
+> 2. Đo inter-annotator agreement giữa hai người trước. Agreement thấp thì rubric
+>    đang mơ hồ.
+> 3. So judge với human bằng Cohen's kappa hoặc Spearman correlation.
+> 4. Sửa rubric, few-shot examples hoặc threshold đến khi agreement đủ cao.
+> 5. Re-calibrate định kỳ, vì judge model và phân phối câu hỏi thay đổi theo thời
+>    gian.
 
 ### Exercise 1.3 — Evaluation trong CI/CD
 
@@ -62,13 +104,32 @@ Ba bias thường gặp:
 
 | Metric | Threshold | Lý do |
 |---|---:|---|
-| Faithfulness | | |
-| Answer Relevance | | |
-| Completeness | | |
+| Faithfulness | avg ≥ 0.70 và 0 case `hallucination` ở nhóm policy | Rủi ro cao nhất cho customer support: hứa sai refund/warranty/phí gây thiệt hại tài chính và khiếu nại. Ngưỡng cao hơn pass rule 0.5 của từng case vì đây là gate cho toàn bộ release. |
+| Answer Relevance | avg ≥ 0.60 | Word-overlap đánh giá thấp các câu từ chối đúng và paraphrase, nên đặt quá cao sẽ block nhầm. 0.6 là ranh giới "Needs work" theo bài giảng. |
+| Completeness | avg ≥ 0.60 | Thiếu điều kiện hoặc ngoại lệ là lỗi nghiêm trọng, nhưng expected answer do người viết có wording khác answer nên heuristic vốn thấp hơn thực tế. Kết hợp thêm rule: **block nếu bất kỳ metric nào giảm > 0.05 so với baseline** (`run_regression`). |
+
+> Các ngưỡng trên là điểm khởi đầu. Sau lần benchmark thật đầu tiên, cần
+> calibrate lại theo baseline và human review, tránh threshold làm block nhầm
+> quá nhiều.
 
 **Câu 2: Khi nào dùng offline evaluation, online evaluation và human review?**
 
 > *Câu trả lời:*
+>
+> - **Offline evaluation:** trước khi deploy, chạy trên golden dataset cố định
+>   (20 QA + regression set) mỗi khi đổi prompt, model, retriever, chunking,
+>   `top-k` hoặc corpus policy. Kết quả tái lập được, so sánh được với baseline
+>   và dùng làm **quality gate trong CI/CD**.
+> - **Online evaluation:** sau khi deploy (canary/A-B test và production) trên
+>   traffic thật. Sample hội thoại để chấm reference-free metrics (faithfulness
+>   so với retrieved context, relevance, LLM judge) và theo dõi tín hiệu người
+>   dùng: escalation rate, thumbs down, khách hỏi lại, CSAT. Mục tiêu là phát
+>   hiện drift, loại câu hỏi mới chưa có trong golden set, hoặc tác động của
+>   policy update.
+> - **Human review:** dùng cho case rủi ro cao (refund dispute, fraud, account 
+>   takeover, privacy); khi metrics mâu thuẫn hoặc judge có độ tin cậy thấp; 
+>   khi audit sample định kỳ và trước các launch lớn. Các failure do người phát
+>   hiện được đưa ngược vào golden/regression dataset.
 
 ---
 
