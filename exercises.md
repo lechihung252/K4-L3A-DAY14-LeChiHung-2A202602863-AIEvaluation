@@ -414,22 +414,86 @@ thay đổi Context Recall hay không.
 4. Rerank cùng tập chunks, không thêm hoặc xóa chunk.
 5. Tính lại hai metrics và giải thích kết quả.
 
+**Cách làm:** `rerank_by_overlap(contexts, query)` sắp xếp chunks theo số token
+chung với query (sau khi bỏ stopword), chunk trùng nhiều nhất lên đầu. `sorted()`
+là stable nên chunk có cùng overlap giữ nguyên thứ tự của BM25. Query dùng để
+rerank là **câu hỏi** của user, không phải expected answer, vì lúc chạy thật
+hệ thống không có expected answer (dùng expected sẽ là data leakage). Cùng 5
+chunks trong `artifacts/actual_answers.json`, không thêm hoặc bớt chunk nào;
+metrics vẫn tính theo expected answer như Exercise 3.2.
+
+Chọn 9 cases: mọi case có precision < 1.0 trước rerank, cộng E02 (case duy
+nhất bị giảm từ 1.0).
+
 | ID | Recall before | Recall after | Precision before | Precision after | Delta Precision |
 |---|---:|---:|---:|---:|---:|
-| | | | | | |
-| | | | | | |
-| | | | | | |
-| | | | | | |
-| | | | | | |
-| **Avg** | | | | | |
+| E02 | 1.000 | 1.000 | 1.000 | 0.917 | -0.083 |
+| E04 | 1.000 | 1.000 | 0.917 | 0.756 | -0.161 |
+| M02 | 0.976 | 0.976 | 0.700 | 0.756 | +0.056 |
+| M05 | 0.333 | 0.333 | 0.589 | 0.589 | +0.000 |
+| M06 | 0.767 | 0.767 | 0.950 | 1.000 | +0.050 |
+| M07 | 1.000 | 1.000 | 0.887 | 0.950 | +0.062 |
+| H02 | 0.872 | 0.872 | 0.950 | 1.000 | +0.050 |
+| H04 | 0.471 | 0.471 | 0.950 | 0.950 | +0.000 |
+| A01 | 0.290 | 0.290 | 0.325 | 0.833 | +0.508 |
+| **Avg** | **0.745** | **0.745** | **0.808** | **0.861** | **+0.054** |
+
+Trên cả 20 cases: Precision trung bình 0.913 → 0.937, Recall giữ nguyên 0.825.
+11 cases còn lại không đổi vì chunk liên quan đã nằm trên đầu. Để so sánh, nếu
+rerank bằng **expected answer** (oracle, có leakage) thì cả 20 cases đạt
+precision 1.000. Đây là trần của reranking, không phải kết quả dùng được.
+
+**Nhận xét:**
+
+- **Tăng thật:** M02, M06, M07, H02 có một chunk nhiễu nằm giữa các chunk liên
+  quan. Chunk nhiễu đó ít trùng từ với câu hỏi nên bị đẩy xuống cuối.
+- **Giảm:** E04 có 1 chunk thật sự trả lời câu hỏi (OT-07-P04, vẫn đứng đầu).
+  Chunk OT-00-P02 trùng 2 từ với câu hỏi ("OrbitTech", "issue") nhưng không có
+  token nào của answer, nên bị kéo từ hạng 5 lên hạng 2 và đẩy 2 chunk "liên
+  quan nhẹ" (coverage 0.14 và 0.36) xuống. E02 cũng tương tự. Overlap với câu
+  hỏi không đồng nghĩa với chứa câu trả lời; cross-encoder hiểu ngữ nghĩa sẽ
+  không mắc lỗi này.
+- **A01 +0.508 chủ yếu là artifact của metric:** hai chunk "liên quan" là chunk
+  về refund, chỉ vừa vượt threshold 0.1 vì trùng từ "refund" với expected
+  answer. Chunk thực sự cần là scope OT-00-P03 thì không có trong 5 chunks, nên
+  answer không tốt hơn dù precision tăng mạnh.
 
 **Tại sao Recall dự kiến không đổi?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Context Recall tính trên **hợp** (union) token của tất cả
+> retrieved chunks. Reranking chỉ đổi thứ tự, không thêm hoặc bớt chunk, nên
+> tập hợp token giữ nguyên và recall không đổi (bảng trên xác nhận: 9/9 cases
+> recall bằng nhau trước và sau). Recall không quan tâm thứ tự; Precision là
+> AP@K nên phụ thuộc vào vị trí chunk liên quan. Lưu ý: điều này chỉ đúng khi
+> rerank **đúng tập K chunks cũ**. Nếu pipeline thật lấy top-20 từ BM25 rồi
+> rerank và cắt còn top-5 thì tập chunk thay đổi và recall có thể tăng hoặc
+> giảm.
 
 **Khi nào reranking không đủ và cần sửa retriever/query/chunking?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Khi **recall thấp**, tức là evidence không có trong top-K.
+> Reranking không tạo ra chunk mới:
+>
+> - **M05** (recall 0.333): precision không đổi 0.589 vì cả 5 chunks đều chỉ
+>   liên quan nhẹ (coverage 0.06–0.14). Chunk cần là OT-08-P02 (xử lý account
+>   compromise) không được BM25 lấy vì câu hỏi dùng "got into my account" chứ
+>   không dùng "compromise". Cần sửa **query**: query rewriting/expansion
+>   (thêm từ đồng nghĩa như "compromised", "unauthorized"), hoặc hybrid search
+>   BM25 + dense embedding để bắt đúng nghĩa.
+> - **H04** (recall 0.471): thiếu chunk exclusions OT-06-P03 và OT-06-P05.
+>   Câu hỏi có nhiều ý (rơi máy + OrbitPlus + loaner), một query BM25 không phủ
+>   hết. Cần **tách câu hỏi thành sub-queries** hoặc tăng K rồi mới rerank.
+> - **A01** (recall 0.290): chunk scope OT-00-P03 không được lấy. Nên thêm bước
+>   **phân loại intent/out-of-scope** trước retrieval thay vì mong retriever
+>   tìm ra chunk scope.
+> - **Chunking:** nếu một điều kiện policy bị cắt ra hai chunk, hoặc một chunk
+>   chứa nhiều policy khác nhau (chunk lớn trùng từ nhiều nhưng ít đúng ý) thì
+>   cần chỉnh kích thước/overlap của chunk hoặc chunk theo section.
+>
+> Quy tắc: **recall thấp → sửa retriever/query/chunking; recall cao nhưng
+> precision thấp → reranking**. Ở bài này recall trung bình 0.825 và precision
+> 0.913 đã khá cao, nên lợi ích của reranking nhỏ (+0.024 trên 20 cases), còn
+> ba case có recall thấp nhất thì reranking không cứu được.
 
 ---
 
@@ -450,4 +514,4 @@ Hoàn thành kiểm tra cuối trong khoảng 16:50–17:00.
 - [x] Exercise 3.3 có rubric 1–5 và bias controls.
 - [x] `reflection.md` có ba failure analyses và regression strategy.
 - [x] Đã copy `template.py` thành `solution/solution.py`.
-- [ ] Exercise 3.4 và 3.5 chỉ làm nếu chọn bonus.
+- [x] Exercise 3.5 (bonus) hoàn thành; Exercise 3.4 không làm.
